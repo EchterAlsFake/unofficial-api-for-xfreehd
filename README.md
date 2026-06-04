@@ -17,12 +17,22 @@
 # Features
 - Fetch videos + metadata
 - Download videos
-- Fetch album images
+- Fetch Albums
+- Asynchronous
 - Built-in caching
 - Easy interface
 - Great type hinting
-- Proxy support
-- Very customizable
+
+#### Networking Features
+- HTTP 2.0 / HTTP 3.0
+- Browser impersonation
+- Custom JA3
+- All proxy types
+- Proxy authentication
+- Speed Limit
+- DNS over HTTPS
+- And even more...
+- All of this is configurable and can be adjusted as you like!
 
 # Supported Platforms
 This API has been tested and confirmed working on:
@@ -39,19 +49,24 @@ This API has been tested and confirmed working on:
 
 ```python
 from xfreehd_api import Client
+import asyncio
 # Initialize a Client object
-client = Client()
 
-# Fetch a video
-video_object = client.get_video("<insert_url_here>")
-
-# Information from Video objects
-print(video_object.title)
-print(video_object.likes)
-# Download the video
-
-video_object.download(quality="hd", path="your_output_path + filename")
-
+async def do_something():
+    client = Client()
+    
+    # Fetch a video
+    video_object = await client.get_video("<insert_url_here>")
+    
+    # Information from Video objects
+    print(video_object.title)
+    print(video_object.likes)
+    # Download the video
+    
+    await video_object.download(quality="hd", path="your_output_path + filename")
+    
+asyncio.run(do_something())
+    
 # SEE DOCUMENTATION FOR MORE
 ```
 

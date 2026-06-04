@@ -5,6 +5,8 @@ Licensed under LGPLv3
 If you haven't received the license with this library, see: https://www.gnu.org/licenses/lgpl-3.0.en.html
 Only use this library under your local laws. I do not endorse any copyright infringement.
 """
+import asyncio
+
 from bs4 import BeautifulSoup
 
 try:
@@ -32,12 +34,22 @@ except (ModuleNotFoundError, ImportError):
 
 
 class Video:
-    def __init__(self, url: str, core: Optional[BaseCore] = None):
+    def __init__(self, url: str, core: Optional[BaseCore] = None, html_content: str = None):
         self.url = url
         self.core = core
+        self.html_content = html_content
+        self.soup: Optional[BeautifulSoup] = None
         self.logger = setup_logger(name="XFreeHD API - [Video]", log_file=None, level=logging.ERROR)
-        self.html_content = self.core.fetch(self.url)
+
+    async def init(self):
+        if not self.html_content:
+            self.html_content = await self.get_html_content()
+
         self.soup = BeautifulSoup(self.html_content, parser)
+        return self
+
+    async def get_html_content(self) -> str:
+        return await self.core.fetch(self.url)
 
     def enable_logging(self, log_file: str = None, level = None, log_ip: str = None, log_port: int = None):
         self.logger = setup_logger(name="XFreeHD API - [Video]", log_file=log_file, level=level, http_ip=log_ip, http_port=log_port)
@@ -105,7 +117,7 @@ class Video:
         urls = [tag.get("src") for tag in tags]
         return urls
 
-    def download(self, quality: str = "hd", no_title: bool = False, path="./", callback=None, stop_event: threading.Event = None):
+    async def download(self, quality: str = "hd", no_title: bool = False, path="./", callback=None, stop_event: threading.Event = None):
         cdn_urls = self.cdn_urls
 
         if len(cdn_urls) == 2: # There's no further quality specification other than HD / SD...
@@ -122,7 +134,7 @@ class Video:
             path = os.path.join(path, f"{self.title}.mp4")
 
         try:
-            self.core.legacy_download(url=download_url, path=path, callback=callback, stop_event=stop_event)
+            await self.core.legacy_download(url=download_url, path=path, callback=callback, stop_event=stop_event)
             return True
 
         except Exception:
@@ -132,12 +144,23 @@ class Video:
 
 
 class Album:
-    def __init__(self, url: str, core: Optional[BaseCore] = None):
+    def __init__(self, url: str, core: Optional[BaseCore] = None, html_content: str = None):
         self.url = url
         self.core = core
+        self.html_content = html_content
+        self.soup: Optional[BeautifulSoup] = None
         self.logger = setup_logger(name="XFreeHD API - [Album]", log_file=None, level=logging.ERROR)
-        self.html_content = self.core.fetch(self.url)
+
+
+    async def init(self):
+        if not self.html_content:
+            self.html_content = await self.get_html_content(self.url)
+          
         self.soup = BeautifulSoup(self.html_content, parser)
+        return self
+
+    async def get_html_content(self, url) -> str:
+        return await self.core.fetch(url)
 
     def enable_logging(self, log_file: str = None, level = None, log_ip: str = None, log_port: int = None):
         self.logger = setup_logger(name="XFreeHD API - [Album]", log_file=log_file, level=level, http_ip=log_ip, http_port=log_port)
@@ -164,7 +187,7 @@ class Album:
 
         return math.ceil(total / per_page)
 
-    def _scrape_images(self, html: str) -> list:
+    async def _scrape_images(self, html: str) -> list:
         soup = BeautifulSoup(html, parser)
         divs = soup.find_all("div", class_="thumb-overlay album-thumb")
         a_tags = [div.find("a") for div in divs]
@@ -172,7 +195,7 @@ class Album:
 
         return urls
 
-    def get_images_by_page(self, page: int = None) -> list:
+    async def get_images_by_page(self, page: int = None) -> list:
         if page > self.total_pages_count:
             raise "This page doesn't exist"
 
@@ -181,21 +204,21 @@ class Album:
 
         else:
             url = f"{self.url}?page={page}"
-            html = self.core.fetch(url)
-            images = self._scrape_images(html)
+            html = await self.core.fetch(url)
+            images = await self._scrape_images(html)
 
         return images
 
-    def get_all_images(self) -> list:
+    async def get_all_images(self) -> list:
         all_images = []
-        for page in range(1, self.total_pages_count + 1):
-            if page == 1:
-                all_images.extend(self._scrape_images(self.html_content))
 
-            else:
-                url = f"{self.url}?page={page}"
-                html = self.core.fetch(url)
-                all_images.extend(self._scrape_images(html))
+        all_images.extend(await self._scrape_images(self.html_content))
+        page_urls = [f"{self.url}?page={page}" for page in range(2, self.total_pages_count + 1)]
+
+        if page_urls:
+            pages_html = await asyncio.gather(*[self.get_html_content(url) for url in page_urls])
+            for html in pages_html:
+                all_images.extend(await self._scrape_images(html))
 
         return all_images
 
@@ -209,9 +232,10 @@ class Client:
     def enable_logging(self, log_file: str = None, level = None, log_ip: str = None, log_port: int = None):
         self.logger = setup_logger(name="XFreeHD API - [Client]", log_file=log_file, level=level, http_ip=log_ip, http_port=log_port)
 
-    def get_video(self, url: str) -> Video:
-        return Video(url=url, core=self.core)
+    async def get_video(self, url: str) -> Video:
+        video = Video(url=url, core=self.core)
+        return await video.init()
 
-    def get_album(self, url: str) -> Album:
-        return Album(url=url, core=self.core)
-
+    async def get_album(self, url: str) -> Album:
+        album = Album(url=url, core=self.core)
+        return await album.init()
