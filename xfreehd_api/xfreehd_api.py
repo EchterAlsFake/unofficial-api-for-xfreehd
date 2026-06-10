@@ -5,25 +5,29 @@ Licensed under LGPLv3
 If you haven't received the license with this library, see: https://www.gnu.org/licenses/lgpl-3.0.en.html
 Only use this library under your local laws. I do not endorse any copyright infringement.
 """
-import asyncio
-
-from bs4 import BeautifulSoup
-
 try:
     from modules.consts import *
+    from modules.errors import *
+    from modules.type_hints import *
+
 except (ModuleNotFoundError, ImportError):
     from .modules.consts import *
+    from .modules.errors import *
+    from .modules.type_hints import *
 
 
 import math
+import asyncio
 import os.path
 import logging
 import traceback
 import threading
 
-from typing import Optional
+from bs4 import BeautifulSoup
+from curl_cffi import Response
 from functools import cached_property
 from base_api import BaseCore, setup_logger
+from base_api.modules.errors import NetworkingError, InvalidProxy, BotProtectionDetected, UnknownError
 
 try:
     import lxml
@@ -33,25 +37,57 @@ except (ModuleNotFoundError, ImportError):
     parser = "html.parser"
 
 
+async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
+    # What should I do here?
+    try:
+        content = await core.fetch(url)
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, Response):
+            if content.status_code == 404:
+                raise NotFound(f"Server returned 404 for: {url}")
+
+    except NetworkingError as e:
+        raise NetworkError(str(e)) from e
+
+    except InvalidProxy as e:
+        raise ProxyError(str(e)) from e
+
+    except BotProtectionDetected as e:
+        raise BotDetection(str(e)) from e
+
+    except UnknownError as e:
+        raise UnknownNetworkError(str(e)) from e
+
+
 class Video:
-    def __init__(self, url: str, core: Optional[BaseCore] = None, html_content: str = None):
+    def __init__(self, url: str, core: BaseCore, html_content: str | None = None):
         self.url = url
         self.core = core
         self.html_content = html_content
-        self.soup: Optional[BeautifulSoup] = None
+        self._soup: BeautifulSoup | None = None
         self.logger = setup_logger(name="XFreeHD API - [Video]", log_file=None, level=logging.ERROR)
 
     async def init(self):
         if not self.html_content:
-            self.html_content = await self.get_html_content()
+            self.html_content = await get_html_content(url=self.url, core=self.core)
 
-        self.soup = BeautifulSoup(self.html_content, parser)
+        assert isinstance(self.html_content, str)
+        self._soup = BeautifulSoup(self.html_content, parser)
         return self
 
-    async def get_html_content(self) -> str:
-        return await self.core.fetch(self.url)
+    @property
+    def soup(self) -> BeautifulSoup:
+        if not self._soup:
+            raise ValueError("You probably forgot to call init")
 
-    def enable_logging(self, log_file: str = None, level = None, log_ip: str = None, log_port: int = None):
+        return self._soup
+
+    def enable_logging(self, log_file: str | None = None, level: int | None = None, log_ip: str | None = None, log_port: int | None = None):
+        if not level:
+            level = logging.DEBUG
+
         self.logger = setup_logger(name="XFreeHD API - [Video]", log_file=log_file, level=level, http_ip=log_ip, http_port=log_port)
 
     @cached_property
@@ -117,7 +153,7 @@ class Video:
         urls = [tag.get("src") for tag in tags]
         return urls
 
-    async def download(self, quality: str = "hd", no_title: bool = False, path="./", callback=None, stop_event: threading.Event = None):
+    async def download(self, quality: str = "hd", no_title: bool = False, path="./", callback: callback_hint = None, stop_event: threading.Event | None = None):
         cdn_urls = self.cdn_urls
 
         if len(cdn_urls) == 2: # There's no further quality specification other than HD / SD...
@@ -130,7 +166,7 @@ class Video:
         else:
             download_url = cdn_urls[0] # Video is only available in SD quality
 
-        if no_title is False:
+        if not no_title:
             path = os.path.join(path, f"{self.title}.mp4")
 
         try:
@@ -144,25 +180,32 @@ class Video:
 
 
 class Album:
-    def __init__(self, url: str, core: Optional[BaseCore] = None, html_content: str = None):
+    def __init__(self, url: str, core: BaseCore, html_content: str | None = None):
         self.url = url
         self.core = core
         self.html_content = html_content
-        self.soup: Optional[BeautifulSoup] = None
+        self._soup: BeautifulSoup | None = None
         self.logger = setup_logger(name="XFreeHD API - [Album]", log_file=None, level=logging.ERROR)
-
 
     async def init(self):
         if not self.html_content:
-            self.html_content = await self.get_html_content(self.url)
-          
-        self.soup = BeautifulSoup(self.html_content, parser)
+            self.html_content = await get_html_content(core=self.core, url=self.url)
+
+        assert isinstance(self.html_content, str)
+        self._soup = BeautifulSoup(self.html_content, parser)
         return self
 
-    async def get_html_content(self, url) -> str:
-        return await self.core.fetch(url)
+    @property
+    def soup(self) -> BeautifulSoup:
+        if not self._soup:
+            raise ValueError("You probably forgot to call init")
 
-    def enable_logging(self, log_file: str = None, level = None, log_ip: str = None, log_port: int = None):
+        return self._soup
+
+    def enable_logging(self, log_file: str | None = None, level: int | None = None, log_ip: str | None = None, log_port: int | None = None):
+        if not level:
+            level = logging.DEBUG
+
         self.logger = setup_logger(name="XFreeHD API - [Album]", log_file=log_file, level=level, http_ip=log_ip, http_port=log_port)
 
     @cached_property
@@ -174,6 +217,7 @@ class Album:
         """
         Calculates the total amount of pages
         """
+        assert isinstance(self.html_content, str)
         soup = BeautifulSoup(self.html_content, parser)
         text = soup.find("div", class_="panel panel-default").find("div",class_="panel-body").text.strip()
 
@@ -187,7 +231,8 @@ class Album:
 
         return math.ceil(total / per_page)
 
-    async def _scrape_images(self, html: str) -> list:
+    @staticmethod
+    async def _scrape_images(html: str) -> list:
         soup = BeautifulSoup(html, parser)
         divs = soup.find_all("div", class_="thumb-overlay album-thumb")
         a_tags = [div.find("a") for div in divs]
@@ -195,28 +240,30 @@ class Album:
 
         return urls
 
-    async def get_images_by_page(self, page: int = None) -> list:
+    async def get_images_by_page(self, page: int = 1) -> list:
         if page > self.total_pages_count:
             raise "This page doesn't exist"
 
         if page == 1:
-            images = self._scrape_images(self.html_content)
+            assert isinstance(self.html_content, str)
+            images = await self._scrape_images(self.html_content)
 
         else:
             url = f"{self.url}?page={page}"
-            html = await self.core.fetch(url)
+            html = await get_html_content(core=self.core, url=url)
+            assert isinstance(html, str)
             images = await self._scrape_images(html)
 
         return images
 
     async def get_all_images(self) -> list:
         all_images = []
-
+        assert isinstance(self.html_content, str)
         all_images.extend(await self._scrape_images(self.html_content))
         page_urls = [f"{self.url}?page={page}" for page in range(2, self.total_pages_count + 1)]
 
         if page_urls:
-            pages_html = await asyncio.gather(*[self.get_html_content(url) for url in page_urls])
+            pages_html = await asyncio.gather(*[get_html_content(core=self.core, url=url) for url in page_urls])
             for html in pages_html:
                 all_images.extend(await self._scrape_images(html))
 
@@ -224,12 +271,15 @@ class Album:
 
 
 class Client:
-    def __init__(self, core: Optional[BaseCore] = None):
-        self.core = core or BaseCore()
+    def __init__(self, core: BaseCore = BaseCore()):
+        self.core = core
         self.core.initialize_session()
         self.logger = setup_logger(name="XFreeHD API - [Client]", log_file=None, level=logging.ERROR)
 
-    def enable_logging(self, log_file: str = None, level = None, log_ip: str = None, log_port: int = None):
+    def enable_logging(self, log_file: str | None = None, level: int | None = None, log_ip: str | None = None, log_port: int | None = None):
+        if not level:
+            level = logging.DEBUG
+
         self.logger = setup_logger(name="XFreeHD API - [Client]", log_file=log_file, level=level, http_ip=log_ip, http_port=log_port)
 
     async def get_video(self, url: str) -> Video:
