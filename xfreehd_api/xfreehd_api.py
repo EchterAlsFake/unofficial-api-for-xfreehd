@@ -27,7 +27,7 @@ from bs4 import BeautifulSoup
 from curl_cffi import Response
 from functools import cached_property
 from base_api import BaseCore, setup_logger
-from base_api.modules.errors import NetworkingError, InvalidProxy, BotProtectionDetected, UnknownError
+from base_api.modules.errors import NetworkingError, InvalidProxy, BotProtectionDetected, UnknownError, ResourceGone
 
 try:
     import lxml
