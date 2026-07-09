@@ -3,7 +3,7 @@ requires = ["uv_build>=0.9.18,<0.10.0"]
 build-backend = "uv_build"
 
 [project]
-name = "xfreehd_api"
+name = "unofficial-api-for-xfreehd"
 version = "1.5"
 description = "An asynchronous Python API wrapper and scraper for xfreehd.com"
 readme = { file = "README.md", content-type = "text/markdown" }
@@ -51,5 +51,3 @@ packages = { find = {} }
 module-name = "xfreehd_api"
 module-root = ""
 
-[tool.uv.sources]
-eaf-base-api = { path = "../eaf_base_api", editable = true }

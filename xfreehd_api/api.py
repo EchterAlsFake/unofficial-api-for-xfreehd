@@ -10,14 +10,24 @@ import asyncio
 import os.path
 
 from curl_cffi import Response
+from typing import AsyncGenerator
 from dataclasses import dataclass, fields
 from selectolax.lexbor import LexborHTMLParser
-from base_api import BaseCore, BaseMedia, DownloadConfigRAW
-from base_api.modules.errors import NetworkRequestError, InvalidProxy, BotProtectionDetected, UnknownError
+from base_api import BaseCore, BaseMedia, DownloadConfigRAW, Helper, on_error_hint, ScrapeResult
+from base_api.modules.errors import NetworkRequestError, InvalidProxy, BotProtectionDetected, UnknownError, ResourceGone
 
-from xfreehd_api.modules.consts import REGEX_THUMBNAIL, REGEX_VIDEO_DURATION
+from xfreehd_api.modules.consts import REGEX_THUMBNAIL, REGEX_VIDEO_DURATION, extractor_search
 from xfreehd_api.modules.errors import (NetworkError, NotFound, UnknownNetworkError, BotDetection, ProxyError,
                                         DownloadFailed)
+
+
+async def on_error(url: str, error: Exception, attempt: int) -> bool:
+    print(f"URL: {url}, ERROR: {error}, Attempt: {attempt}")
+
+    if isinstance(error, ResourceGone):
+        return False
+
+    return True
 
 
 async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
@@ -59,6 +69,9 @@ class Video(BaseMedia):
     categories: list[str] | None = None
     tags: list[str] | None = None
     cdn_urls: list[str] | None = None
+
+    # Optional
+    rating: str | None = None
 
     async def _perform_load(self, api: bool, html: bool, anything_else: bool):
         if html:
@@ -221,6 +234,7 @@ class Client:
     def __init__(self, core: BaseCore = BaseCore()):
         self.core = core
         self.core.initialize_session()
+        self.helper = Helper(core=self.core, constructor=Video)
 
     async def get_video(self, url: str, load_html: bool = True) -> Video:
         video = Video(url=url, core=self.core)
@@ -229,3 +243,21 @@ class Client:
     async def get_album(self, url: str, load_html: bool = True) -> Album:
         album = Album(url=url, core=self.core)
         return await album.load(html=load_html)
+
+    async def search(self, query: str, pages: int = 5, max_videos_concurrency: int = 20,
+                     max_pages_concurrency: int = 2, keep_original_order: bool = False,
+                     load_html: bool = False, on_video_error: on_error_hint=on_error,
+                     on_page_error: on_error_hint = None) -> AsyncGenerator[ScrapeResult, None]:
+        query = query.replace(" ", "+")
+        page_urls = [f"https://xfreehd.com/search?search_query={query}&search_type=videos&page={page}" for page in range(1, pages + 1)]
+
+        videos_concurrency = max_videos_concurrency or self.core.configuration.videos_concurrency
+        pages_concurrency = max_pages_concurrency or self.core.configuration.pages_concurrency
+        assert videos_concurrency and pages_concurrency
+        async for scrape_result in self.helper.iterator(target_page_urls=page_urls,
+                                                        max_video_concurrency=videos_concurrency,
+                                                        max_page_concurrency=pages_concurrency,
+                                                        video_link_extractor=extractor_search,
+                                                        on_video_error=on_video_error, on_page_error=on_page_error,
+                                                        keep_original_order=keep_original_order, fetch_html=load_html):
+            yield scrape_result
