@@ -4,8 +4,8 @@ build-backend = "uv_build"
 
 [project]
 name = "xfreehd_api"
-version = "1.4.2"
-description = "A Python API for the Porn Site xfreehd.com"
+version = "1.5"
+description = "An asynchronous Python API wrapper and scraper for xfreehd.com"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.12"
 license = "LGPL-3.0-only"
@@ -13,19 +13,36 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Johannes Habel", email = "EchterAlsFake@proton.me" }
 ]
+keywords = [
+    "api",
+    "scraper",
+    "async",
+    "asyncio",
+    "video-downloader",
+    "selectolax",
+    "curl-cffi",
+    "xfreehd"
+]
+
 dependencies = [
-    "bs4",
-    "eaf_base_api",
+    "selectolax",
+    "eaf-base-api",
 ]
 classifiers = [
-    "Programming Language :: Python",
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Multimedia :: Video"
 ]
 
-[project.optional-dependencies]
-full = ["lxml"] # LXML for faster parsing speed, though optional :)
 
 [project.urls]
-Homepage = "https://github.com/EchterAlsFake/xfreehd_api"
+Homepage = "https://github.com/EchterAlsFake/unofficial-api-for-xfreehd"
 
 [tool.setuptools]
 packages = { find = {} }
@@ -33,3 +50,6 @@ packages = { find = {} }
 [tool.uv.build-backend]
 module-name = "xfreehd_api"
 module-root = ""
+
+[tool.uv.sources]
+eaf-base-api = { path = "../eaf_base_api", editable = true }

@@ -1,4 +1,6 @@
-from ..xfreehd_api import Client
+from base_api import DownloadConfigRAW
+
+from ..api import Client
 import pytest
 
 
@@ -17,5 +19,5 @@ async def test_all():
     assert isinstance(video.author, str) and len(video.author) > 0
     assert isinstance(video.thumbnail, str) and len(video.thumbnail) > 0
     assert isinstance(video.cdn_urls, list) and len(video.cdn_urls) > 0
-    assert await video.download(quality="sd") is True
-    assert await video.download(quality="hd") is True
+    assert await video.download(DownloadConfigRAW(quality="sd")) is True
+    assert await video.download(DownloadConfigRAW(quality="hd")) is True

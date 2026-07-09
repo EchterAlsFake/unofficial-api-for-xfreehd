@@ -1,4 +1,4 @@
-from ..xfreehd_api import Client
+from ..api import Client
 import pytest
 
 @pytest.mark.asyncio
