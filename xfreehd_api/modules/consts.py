@@ -18,6 +18,8 @@ def extractor_search(html_content: str) -> list[dict]:
             continue
 
         url = link_el.attributes.get("href", "").strip()
+        if not url:
+            continue
 
         title_el = node.css_first("span.video-title-new")
         title = title_el.text(strip=True) if title_el else ""

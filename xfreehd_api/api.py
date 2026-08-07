@@ -7,41 +7,84 @@ Only use this library under your local laws. I do not endorse any copyright infr
 """
 import math
 import asyncio
+import logging
 import os.path
 
-from curl_cffi import Response
-from typing import AsyncGenerator
-from dataclasses import dataclass, fields
+from typing import AsyncGenerator, ClassVar
+from dataclasses import dataclass
 from selectolax.lexbor import LexborHTMLParser
-from base_api import BaseCore, BaseMedia, DownloadConfigRAW, Helper, on_error_hint, ScrapeResult
-from base_api.modules.errors import NetworkRequestError, InvalidProxy, BotProtectionDetected, UnknownError, ResourceGone
+from base_api import (
+    BaseCore,
+    BaseMedia,
+    DownloadConfigRAW,
+    ErrorAction,
+    ErrorHandler,
+    ErrorMode,
+    Helper,
+    MediaLoadError,
+    MediaLoadErrors,
+    ResultOrder,
+    RetryPolicy,
+    ScrapeErrorContext,
+    ScrapeResult,
+    media_field,
+)
+from base_api.modules.errors import (
+    BotProtectionDetected,
+    HTTPStatusError,
+    InvalidProxy,
+    NetworkRequestError,
+    RequestRetriesExhausted,
+    ResourceGone,
+    UnknownError,
+)
 
 from xfreehd_api.modules.consts import REGEX_THUMBNAIL, REGEX_VIDEO_DURATION, extractor_search
 from xfreehd_api.modules.errors import (NetworkError, NotFound, UnknownNetworkError, BotDetection, ProxyError,
                                         DownloadFailed)
 
 
-async def on_error(url: str, error: Exception, attempt: int) -> bool:
-    print(f"URL: {url}, ERROR: {error}, Attempt: {attempt}")
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
+SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=3)
+
+
+def _is_resource_gone(error: BaseException) -> bool:
     if isinstance(error, ResourceGone):
-        return False
+        return True
+    if isinstance(error, MediaLoadError):
+        return _is_resource_gone(error.original_error)
+    if isinstance(error, MediaLoadErrors):
+        return any(_is_resource_gone(item) for item in error.errors)
+    return False
 
-    return True
+
+async def on_error(context: ScrapeErrorContext) -> ErrorAction:
+    logger.error(
+        "URL: %s, ERROR: %s, Attempt: %s/%s",
+        context.url,
+        context.error,
+        context.attempt,
+        context.max_attempts,
+    )
+
+    if _is_resource_gone(context.error):
+        return ErrorAction.SKIP
+
+    return ErrorAction.RETRY
 
 
-async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
-    # What should I do here?
+async def get_html_content(core: BaseCore, url: str) -> str:
     try:
-        content = await core.fetch(url)
-        if isinstance(content, str):
-            return content
+        return await core.fetch_text(url)
 
-        if isinstance(content, Response):
-            if content.status_code == 404:
-                raise NotFound(f"Server returned 404 for: {url}")
+    except HTTPStatusError as e:
+        if e.status_code == 404:
+            raise NotFound(f"Server returned 404 for: {url}") from e
+        raise NetworkError(str(e)) from e
 
-    except NetworkRequestError as e:
+    except (NetworkRequestError, RequestRetriesExhausted) as e:
         raise NetworkError(str(e)) from e
 
     except InvalidProxy as e:
@@ -58,34 +101,26 @@ async def get_html_content(core: BaseCore, url: str) -> str | None | dict:
 class Video(BaseMedia):
     url: str
     core: BaseCore
-    title: str | None = None
-    likes: str | None = None
-    dislikes: str | None = None
-    publish_date: str | None = None
-    views: str | None = None
-    author: str | None = None
-    thumbnail: str | None = None
-    length: str | None = None
-    categories: list[str] | None = None
-    tags: list[str] | None = None
-    cdn_urls: list[str] | None = None
+    title: str | None = media_field("html")
+    likes: str | None = media_field("html")
+    dislikes: str | None = media_field("html")
+    publish_date: str | None = media_field("html")
+    views: str | None = media_field("html")
+    author: str | None = media_field("html")
+    thumbnail: str | None = media_field("html")
+    length: str | None = media_field("html")
+    categories: list[str] | None = media_field("html")
+    tags: list[str] | None = media_field("html")
+    cdn_urls: list[str] | None = media_field("html")
 
     # Optional
     rating: str | None = None
 
-    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
-        if html:
-            await asyncio.gather(self._fetch_html())
+    loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
-    async def _fetch_html(self):
+    async def _load_html(self) -> dict[str, object]:
         html_content = await get_html_content(core=self.core, url=self.url)
-        assert isinstance(html_content, str)
-        data: dict = await asyncio.to_thread(self._extract_html, html_content)
-
-        allowed_fields = [field.name for field in fields(self)]
-        for key, value in data.items():
-            if key in allowed_fields:
-                setattr(self, key, value)
+        return await asyncio.to_thread(self._extract_html, html_content)
 
     @staticmethod
     def _extract_html(html_content: str) -> dict:
@@ -108,18 +143,6 @@ class Video(BaseMedia):
         urls = parser.css('source[src][title][type="video/mp4"]')
         cdn_urls = [tag.attributes.get("src") for tag in urls]
 
-        # This might not be perfectly accurate, but I just need this working for Porn Fetch, so this is fine
-        if len(cdn_urls) == 2:
-            qualities = [480, 720] # HD should include 480 and 720 as to my definitions of what "HD" is
-
-        elif len(cdn_urls) == 1:
-            qualities = [480] # SD should be like 480 idk
-
-        else:
-            qualities = []
-
-        video_qualities = qualities
-
         return {
             "title": title,
             "likes": likes,
@@ -131,11 +154,11 @@ class Video(BaseMedia):
             "length": length,
             "categories": categories,
             "tags": tags,
-            "video_qualities": video_qualities,
             "cdn_urls": cdn_urls
         }
 
     async def download(self, configuration: DownloadConfigRAW):
+        await self.load_fields("cdn_urls", "title")
         cdn_urls = self.cdn_urls
         config = configuration
 
@@ -164,19 +187,14 @@ class Video(BaseMedia):
 class Album(BaseMedia):
     url: str
     core: BaseCore
-    title: str | None = None
-    total_pages_count: int | None = None
+    title: str | None = media_field("html")
+    total_pages_count: int | None = media_field("html")
 
-    async def _perform_load(self, api: bool, html: bool, anything_else: bool):
-        if html:
-            await asyncio.gather(self._fetch_html())
+    loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
-    async def _fetch_html(self):
+    async def _load_html(self) -> dict[str, object]:
         html_content = await get_html_content(core=self.core, url=self.url)
-        assert isinstance(html_content, str)
-        data: dict = await asyncio.to_thread(self._extract_data, html_content)
-        self.title = data.get("title")
-        self.total_pages_count = data.get("total_pages_count") # Is this inefficient? Yes. Do I care? No.
+        return await asyncio.to_thread(self._extract_data, html_content)
 
     @staticmethod
     def _extract_data(html_content: str) -> dict:
@@ -208,7 +226,8 @@ class Album(BaseMedia):
         return urls
 
     async def get_images_by_page(self, page: int = 1) -> list:
-        if page > self.total_pages_count:
+        total_pages_count = await self.get_field("total_pages_count")
+        if page > total_pages_count:
             raise "This page doesn't exist"
 
         url = f"{self.url}?page={page}"
@@ -220,7 +239,8 @@ class Album(BaseMedia):
 
     async def get_all_images(self) -> list:
         all_images = []
-        page_urls = [f"{self.url}?page={page}" for page in range(1, self.total_pages_count + 1)]
+        total_pages_count = await self.get_field("total_pages_count")
+        page_urls = [f"{self.url}?page={page}" for page in range(1, total_pages_count + 1)]
 
         if page_urls:
             pages_html = await asyncio.gather(*[get_html_content(core=self.core, url=url) for url in page_urls])
@@ -238,26 +258,39 @@ class Client:
 
     async def get_video(self, url: str, load_html: bool = True) -> Video:
         video = Video(url=url, core=self.core)
-        return await video.load(html=load_html)
+        if load_html:
+            await video.load_sources("html")
+        return video
 
     async def get_album(self, url: str, load_html: bool = True) -> Album:
         album = Album(url=url, core=self.core)
-        return await album.load(html=load_html)
+        if load_html:
+            await album.load_sources("html")
+        return album
 
     async def search(self, query: str, pages: int = 5, max_videos_concurrency: int = 20,
                      max_pages_concurrency: int = 2, keep_original_order: bool = False,
-                     load_html: bool = False, on_video_error: on_error_hint=on_error,
-                     on_page_error: on_error_hint = None) -> AsyncGenerator[ScrapeResult, None]:
+                     load_html: bool = False, on_video_error: ErrorHandler | None = on_error,
+                     on_page_error: ErrorHandler | None = None) -> AsyncGenerator[ScrapeResult[Video], None]:
         query = query.replace(" ", "+")
         page_urls = [f"https://xfreehd.com/search?search_query={query}&search_type=videos&page={page}" for page in range(1, pages + 1)]
 
         videos_concurrency = max_videos_concurrency or self.core.configuration.videos_concurrency
         pages_concurrency = max_pages_concurrency or self.core.configuration.pages_concurrency
         assert videos_concurrency and pages_concurrency
-        async for scrape_result in self.helper.iterator(target_page_urls=page_urls,
-                                                        max_video_concurrency=videos_concurrency,
-                                                        max_page_concurrency=pages_concurrency,
-                                                        video_link_extractor=extractor_search,
-                                                        on_video_error=on_video_error, on_page_error=on_page_error,
-                                                        keep_original_order=keep_original_order, fetch_html=load_html):
-            yield scrape_result
+        stream = self.helper.iterator(
+            target_page_urls=page_urls,
+            max_item_concurrency=videos_concurrency,
+            max_page_concurrency=pages_concurrency,
+            item_extractor=extractor_search,
+            item_error_handler=on_video_error,
+            page_error_handler=on_page_error,
+            item_retry=SCRAPE_RETRY_POLICY,
+            page_retry=SCRAPE_RETRY_POLICY,
+            page_error_mode=ErrorMode.SKIP,
+            order=ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION,
+            load_sources=("html",) if load_html else (),
+        )
+        async with stream:
+            async for scrape_result in stream:
+                yield scrape_result
