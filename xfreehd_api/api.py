@@ -13,17 +13,16 @@ import os.path
 from typing import AsyncGenerator, ClassVar
 from dataclasses import dataclass
 from selectolax.lexbor import LexborHTMLParser
+from base_api.modules.config import IteratorConfig
 from base_api import (
     BaseCore,
     BaseMedia,
     DownloadConfigRAW,
     ErrorAction,
-    ErrorHandler,
     ErrorMode,
     Helper,
     MediaLoadError,
     MediaLoadErrors,
-    ResultOrder,
     RetryPolicy,
     ScrapeErrorContext,
     ScrapeResult,
@@ -48,6 +47,17 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=3)
+
+
+def make_iterator_config() -> IteratorConfig:
+    return IteratorConfig(
+        load_specific_sources=("html",),
+        item_retry=SCRAPE_RETRY_POLICY,
+        page_retry=SCRAPE_RETRY_POLICY,
+        page_error_mode=ErrorMode.SKIP,
+        item_error_handler=None,
+        page_error_handler=None,
+    )
 
 
 def _is_resource_gone(error: BaseException) -> bool:
@@ -268,28 +278,22 @@ class Client:
             await album.load_sources("html")
         return album
 
-    async def search(self, query: str, pages: int = 5, max_videos_concurrency: int = 20,
-                     max_pages_concurrency: int = 2, keep_original_order: bool = False,
-                     load_html: bool = False, on_video_error: ErrorHandler | None = on_error,
-                     on_page_error: ErrorHandler | None = None) -> AsyncGenerator[ScrapeResult[Video], None]:
+    async def search(
+        self,
+        query: str,
+        pages: int = 5,
+        iterator_config: IteratorConfig | None = None,
+    ) -> AsyncGenerator[ScrapeResult[Video], None]:
         query = query.replace(" ", "+")
         page_urls = [f"https://xfreehd.com/search?search_query={query}&search_type=videos&page={page}" for page in range(1, pages + 1)]
 
-        videos_concurrency = max_videos_concurrency or self.core.configuration.videos_concurrency
-        pages_concurrency = max_pages_concurrency or self.core.configuration.pages_concurrency
-        assert videos_concurrency and pages_concurrency
+        if iterator_config is None:
+            iterator_config = make_iterator_config()
+
         stream = self.helper.iterator(
             target_page_urls=page_urls,
-            max_item_concurrency=videos_concurrency,
-            max_page_concurrency=pages_concurrency,
             item_extractor=extractor_search,
-            item_error_handler=on_video_error,
-            page_error_handler=on_page_error,
-            item_retry=SCRAPE_RETRY_POLICY,
-            page_retry=SCRAPE_RETRY_POLICY,
-            page_error_mode=ErrorMode.SKIP,
-            order=ResultOrder.ORIGINAL if keep_original_order else ResultOrder.COMPLETION,
-            load_sources=("html",) if load_html else (),
+            iterator_config=iterator_config,
         )
         async with stream:
             async for scrape_result in stream:
