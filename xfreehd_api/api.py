@@ -192,6 +192,18 @@ class Video(BaseMedia):
         except Exception as e:
             return DownloadFailed(str(e))
 
+    def video_qualities(self) -> list[int]:
+        if len(self.cdn_urls) == 1:
+            return [480]
+
+        elif len(self.cdn_urls) == 2:
+            return [480, 720]
+
+        elif len(self.cdn_urls) >= 3:
+            print(f"TELL ME IMMEDIATELY ON GITHUB WHAT YOU DID, LIKE RIGHT NOW!: {self.cdn_urls}")
+
+        return []
+
 
 @dataclass(kw_only=True, slots=True)
 class Album(BaseMedia):
