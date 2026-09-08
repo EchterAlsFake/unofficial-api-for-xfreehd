@@ -122,6 +122,9 @@ class Video(BaseMedia):
     @staticmethod
     def _extract_html(html_content: str) -> dict:
         parser = LexborHTMLParser(html_content)
+        if "This Video Is No Longer Available." in html_content:
+            raise ResourceGone("Video is no longer available")
+
         title = parser.css_first("h1.big-title-truncate.m-t-0").text(strip=True)
         likes = parser.css_first("a.videoLikeBtn.mr-2").text(strip=True)
         dislikes = parser.css_first("a.videoDisLikeBtn").text(strip=True)
