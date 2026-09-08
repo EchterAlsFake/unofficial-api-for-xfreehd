@@ -11,6 +11,8 @@ import logging
 import os.path
 import argparse
 
+from base_api.modules.logger import configure_app_logging
+
 from base_api.modules.static_functions import str_to_bool
 
 from typing import AsyncGenerator, ClassVar
@@ -36,6 +38,7 @@ from base_api import (
     scrape_stream,
 )
 from base_api.modules.errors import (
+    DownloadCancelled,
     BotProtectionDetected,
     HTTPStatusError,
     InvalidProxy,
@@ -65,21 +68,30 @@ async def get_html_content(core: BaseCore, url: str) -> str:
         return await core.fetch_text(url)
 
     except HTTPStatusError as e:
+        logger.exception("Request failed for %s: %s", url, e)
         if e.status_code == 404:
             raise NotFound(f"Server returned 404 for: {url}") from e
-        raise NetworkError(str(e)) from e
+        raise NetworkError(f"Request failed for {url}: {e}") from e
 
     except (NetworkRequestError, RequestRetriesExhausted) as e:
-        raise NetworkError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise NetworkError(f"Request failed for {url}: {e}") from e
 
     except InvalidProxy as e:
-        raise ProxyError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise ProxyError(f"Request failed for {url}: {e}") from e
 
     except BotProtectionDetected as e:
-        raise BotDetection(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise BotDetection(f"Request failed for {url}: {e}") from e
 
     except UnknownError as e:
-        raise UnknownNetworkError(str(e)) from e
+        logger.exception("Request failed for %s: %s", url, e)
+        raise UnknownNetworkError(f"Request failed for {url}: {e}") from e
+
+    except Exception:
+        logger.exception("Failed to fetch or decode response for %s", url)
+        raise
 
 
 @dataclass(kw_only=True, slots=True)
@@ -143,29 +155,31 @@ class Video(BaseMedia):
         }
 
     async def download(self, configuration: DownloadConfigRAW):
-        await self.load_fields("cdn_urls", "title")
-        cdn_urls = self.cdn_urls
-        config = configuration
+        try:
+            await self.load_fields("cdn_urls", "title")
+            cdn_urls = self.cdn_urls
+            config = configuration
 
-        if len(cdn_urls) == 2: # There's no further quality specification other than HD / SD...
-            if config.quality == "hd":
-                download_url = cdn_urls[1] # HD quality
+            if len(cdn_urls) == 2: # There's no further quality specification other than HD / SD...
+                if config.quality == "hd":
+                    download_url = cdn_urls[1] # HD quality
+
+                else:
+                    download_url = cdn_urls[0] # SD quality
 
             else:
-                download_url = cdn_urls[0] # SD quality
+                download_url = cdn_urls[0] # Video is only available in SD quality
 
-        else:
-            download_url = cdn_urls[0] # Video is only available in SD quality
+            if not config.no_title:
+                config.path = os.path.join(config.path, f"{self.title}.mp4")
 
-        if not config.no_title:
-            config.path = os.path.join(config.path, f"{self.title}.mp4")
-
-        try:
             await self.core.legacy_download(url=download_url, configuration=config)
             return True
-
+        except DownloadCancelled:
+            raise
         except Exception as e:
-            return DownloadFailed(str(e))
+            logger.exception("Download failed for %s: %s", self.url, e)
+            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
 
     def video_qualities(self) -> list[int]:
         if len(self.cdn_urls) == 1:
@@ -225,7 +239,7 @@ class Album(BaseMedia):
     async def get_images_by_page(self, page: int = 1) -> list:
         total_pages_count = await self.get_field("total_pages_count")
         if page > total_pages_count:
-            raise "This page doesn't exist"
+            raise NotFound(f"Album page {page} does not exist for {self.url}; total pages={total_pages_count}")
 
         url = f"{self.url}?page={page}"
         html = await get_html_content(core=self.core, url=url)
@@ -323,10 +337,12 @@ async def run_main(args_list: list[str] | None = None):
             await video.download(configuration=config)
             print(f"Download complete: {title}")
         except Exception as e:
+            logger.exception("CLI failed while processing %s", url)
             print(f"Error downloading {url}: {e}")
 
 
 def main():
+    configure_app_logging(level=logging.INFO)
     try:
         asyncio.run(run_main())
     except KeyboardInterrupt:
@@ -335,4 +351,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
