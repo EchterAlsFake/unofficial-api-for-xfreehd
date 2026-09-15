@@ -8,11 +8,12 @@ Only use this library under your local laws. I do not endorse any copyright infr
 import math
 import asyncio
 import logging
-import os.path
 import argparse
 import urllib.parse
 
-from base_api.modules.logger import configure_app_logging
+from xfreehd_api.modules import errors as provider_errors
+from base_api.modules.provider import fetch_content, download_errors, prepare_download_config
+from base_api.modules.logger import configure_app_logging, get_logger
 
 from base_api.modules.static_functions import str_to_bool
 
@@ -38,24 +39,14 @@ from base_api import (
     default_on_error,
     scrape_stream,
 )
-from base_api.modules.errors import (
-    DownloadCancelled,
-    BotProtectionDetected,
-    HTTPStatusError,
-    InvalidProxy,
-    NetworkRequestError,
-    RequestRetriesExhausted,
-    ResourceGone,
-    UnknownError,
-)
+from base_api.modules.errors import ResourceGone
 
 from xfreehd_api.modules.consts import extractor_search
 from xfreehd_api.modules.errors import (NetworkError, NotFound, UnknownNetworkError, BotDetection, ProxyError,
                                         DownloadFailed)
 
 
-logger = logging.getLogger(__name__)
-logger.addHandler(logging.NullHandler())
+logger = get_logger(__name__)
 
 SCRAPE_RETRY_POLICY = RetryPolicy(max_attempts=3)
 
@@ -64,35 +55,9 @@ on_error = default_on_error
 
 
 
-async def get_html_content(core: BaseCore, url: str) -> str:
-    try:
-        return await core.fetch_text(url)
-
-    except HTTPStatusError as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        if e.status_code == 404:
-            raise NotFound(f"Server returned 404 for: {url}") from e
-        raise NetworkError(f"Request failed for {url}: {e}") from e
-
-    except (NetworkRequestError, RequestRetriesExhausted) as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise NetworkError(f"Request failed for {url}: {e}") from e
-
-    except InvalidProxy as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise ProxyError(f"Request failed for {url}: {e}") from e
-
-    except BotProtectionDetected as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise BotDetection(f"Request failed for {url}: {e}") from e
-
-    except UnknownError as e:
-        logger.exception("Request failed for %s: %s", url, e)
-        raise UnknownNetworkError(f"Request failed for {url}: {e}") from e
-
-    except Exception:
-        logger.exception("Failed to fetch or decode response for %s", url)
-        raise
+async def get_html_content(core: BaseCore, url: str, *, owner=None) -> str:
+    return await fetch_content(core, url, logger=logger, owner=owner,
+                               error_types=provider_errors)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -121,7 +86,7 @@ class Video(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content = await get_html_content(core=self.core, url=self.url)
+        html_content = await get_html_content(core=self.core, url=self.url, owner=self)
         return await asyncio.to_thread(self._extract_html, html_content)
 
     @staticmethod
@@ -289,33 +254,25 @@ class Video(BaseMedia):
             "rating": rating,
         }
 
+    @download_errors(DownloadFailed)
     async def download(self, configuration: DownloadConfigRAW):
-        try:
-            await self.load_fields("cdn_urls", "title")
-            cdn_urls = self.cdn_urls
-            config = configuration
+        await self.load_fields("cdn_urls", "title")
+        cdn_urls = self.cdn_urls
+        config = prepare_download_config(configuration, self.title)
 
-            if not cdn_urls:
-                raise DownloadFailed(f"No CDN URLs available to download for {self.url}")
+        if not cdn_urls:
+            raise DownloadFailed(f"No CDN URLs available to download for {self.url}")
 
-            if len(cdn_urls) == 2:  # There's no further quality specification other than HD / SD...
-                if config.quality in ("hd", "best"):
-                    download_url = cdn_urls[1]  # HD quality
-                else:
-                    download_url = cdn_urls[0]  # SD quality
+        if len(cdn_urls) == 2:  # There's no further quality specification other than HD / SD...
+            if config.quality in ("hd", "best"):
+                download_url = cdn_urls[1]  # HD quality
             else:
-                download_url = cdn_urls[0]  # Video is only available in SD quality
+                download_url = cdn_urls[0]  # SD quality
+        else:
+            download_url = cdn_urls[0]  # Video is only available in SD quality
 
-            if not config.no_title:
-                config.path = os.path.join(config.path, f"{self.title}.mp4")
 
-            await self.core.legacy_download(url=download_url, configuration=config)
-            return True
-        except DownloadCancelled:
-            raise
-        except Exception as e:
-            logger.exception("Download failed for %s: %s", self.url, e)
-            raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
+        return await self.core.legacy_download(url=download_url, configuration=config)
 
     def video_qualities(self) -> list[int]:
         if not self.cdn_urls:
@@ -339,7 +296,7 @@ class Album(BaseMedia):
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
     async def _load_html(self) -> dict[str, object]:
-        html_content = await get_html_content(core=self.core, url=self.url)
+        html_content = await get_html_content(core=self.core, url=self.url, owner=self)
         return await asyncio.to_thread(self._extract_data, html_content)
 
     @staticmethod
@@ -377,7 +334,7 @@ class Album(BaseMedia):
             raise NotFound(f"Album page {page} does not exist for {self.url}; total pages={total_pages_count}")
 
         url = f"{self.url}?page={page}"
-        html = await get_html_content(core=self.core, url=url)
+        html = await get_html_content(core=self.core, url=url, owner=self)
         assert isinstance(html, str)
         images = await asyncio.to_thread(self._scrape_images, html)
 
@@ -389,7 +346,7 @@ class Album(BaseMedia):
         page_urls = [f"{self.url}?page={page}" for page in range(1, total_pages_count + 1)]
 
         if page_urls:
-            pages_html = await asyncio.gather(*[get_html_content(core=self.core, url=url) for url in page_urls])
+            pages_html = await asyncio.gather(*[get_html_content(core=self.core, url=url, owner=self) for url in page_urls])
             for html in pages_html:
                 all_images.extend(await asyncio.to_thread(self._scrape_images, html))
 
