@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os.path
 import argparse
+import urllib.parse
 
 from base_api.modules.logger import configure_app_logging
 
@@ -48,7 +49,7 @@ from base_api.modules.errors import (
     UnknownError,
 )
 
-from xfreehd_api.modules.consts import REGEX_THUMBNAIL, REGEX_VIDEO_DURATION, extractor_search
+from xfreehd_api.modules.consts import extractor_search
 from xfreehd_api.modules.errors import (NetworkError, NotFound, UnknownNetworkError, BotDetection, ProxyError,
                                         DownloadFailed)
 
@@ -104,14 +105,18 @@ class Video(BaseMedia):
     publish_date: str | None = media_field("html")
     views: str | None = media_field("html")
     author: str | None = media_field("html")
+    author_thumbnail: str | None = media_field("html")
+    author_url: str | None = media_field("html")
+    author_subscribers: str | None = media_field("html")
     thumbnail: str | None = media_field("html")
     length: str | None = media_field("html")
     categories: list[str] | None = media_field("html")
     tags: list[str] | None = media_field("html")
     cdn_urls: list[str] | None = media_field("html")
+    embed_url: str | None = media_field("html")
 
-    # Optional
-    rating: str | None = None
+    # Optional / Loaded
+    rating: str | None = media_field("html")
 
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
 
@@ -125,23 +130,145 @@ class Video(BaseMedia):
         if "This Video Is No Longer Available." in html_content:
             raise ResourceGone("Video is no longer available")
 
-        title = parser.css_first("h1.big-title-truncate.m-t-0").text(strip=True)
-        likes = parser.css_first("a.videoLikeBtn.mr-2").text(strip=True)
-        dislikes = parser.css_first("a.videoDisLikeBtn").text(strip=True)
-        publish_date = parser.css_first("div.pull-right.big-views-xs.font-weight-bold.visible-xs.pt-0").css_first("span").text(strip=True)
-        views = parser.css_first("div.pull-right.big-views-xs.font-weight-bold.visible-xs.pt-0").css("span")[1].text(strip=True)
-        author = parser.css_first("div.pull-left.user-container").css_first("a.standard-link").text(strip=True)
-        thumbnail = REGEX_THUMBNAIL.search(html_content).group(1)
-        length = REGEX_VIDEO_DURATION.search(html_content).group(1)
+        # Title: h1 -> meta og/twitter -> share link -> player data-target slug
+        title = None
+        h1_el = parser.css_first("h1.big-title-truncate, h1")
+        if h1_el and h1_el.text(strip=True):
+            title = h1_el.text(strip=True)
+        if not title:
+            og_title = parser.css_first('meta[property="og:title"], meta[name="twitter:title"]')
+            if og_title and og_title.attributes.get("content"):
+                title = og_title.attributes.get("content").strip()
+        if not title:
+            reddit_el = parser.css_first('a[href*="reddit.com/submit"]')
+            if reddit_el and "title=" in reddit_el.attributes.get("href", ""):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(reddit_el.attributes.get("href")).query)
+                reddit_title = qs.get("title", [""])[0]
+                if "|" in reddit_title:
+                    title = reddit_title.split("|")[0].strip()
+                elif reddit_title:
+                    title = reddit_title.strip()
+        if not title:
+            video_el = parser.css_first("video#hdPlayer, video")
+            if video_el and video_el.attributes.get("data-target"):
+                slug = video_el.attributes.get("data-target").rstrip("/").split("/")[-1]
+                title = slug.replace("-", " ").title()
 
-        a_tags = parser.css("div.m-t-10.p-bold.overflow-hidden")[1].css("a")
-        categories = [tag.text(strip=True) for tag in a_tags]
+        # Likes & Dislikes
+        like_btn = parser.css_first("a.videoLikeBtn, [id^='vote_like_']")
+        likes = None
+        if like_btn:
+            num_el = like_btn.css_first("span.num")
+            likes = num_el.text(strip=True) if num_el else like_btn.text(strip=True)
 
-        a_tags = parser.css_first("div.videoTagsSpace.m-t-10.m-b-15.p-bold.overflow-hidden").css("a")
-        tags = [tag.text(strip=True) for tag in a_tags]
+        dislike_btn = parser.css_first("a.videoDisLikeBtn, [id^='vote_dislike_']")
+        dislikes = None
+        if dislike_btn:
+            num_el = dislike_btn.css_first("span.num")
+            dislikes = num_el.text(strip=True) if num_el else dislike_btn.text(strip=True)
 
-        urls = parser.css('source[src][title][type="video/mp4"]')
-        cdn_urls = [tag.attributes.get("src") for tag in urls]
+        # Publish date & Views
+        publish_date = None
+        views = None
+        views_box = parser.css_first("div.big-views-xs, div.big-views")
+        if views_box:
+            spans = views_box.css("span")
+            if spans:
+                publish_date = spans[0].text(strip=True).rstrip(",").strip()
+            if len(spans) > 1:
+                views = spans[1].text(strip=True)
+
+        # Author metadata
+        author_el = parser.css_first("div.user-container a.standard-link, div.user-container strong, a[href*='/user/'] strong")
+        author = author_el.text(strip=True) if author_el else None
+
+        author_link = parser.css_first("div.user-container a[href*='/user/'], a[href*='/user/']")
+        author_url = author_link.attributes.get("href") if author_link else None
+
+        avatar_el = parser.css_first("div.user-container img.medium-avatar, div.user-container img")
+        author_thumbnail = avatar_el.attributes.get("src") if avatar_el else None
+
+        sub_badge = parser.css_first("div.user-container span.sbadge, span[class*='sbadge']")
+        author_subscribers = sub_badge.text(strip=True) if sub_badge else None
+
+        # Video Thumbnail
+        thumbnail = None
+        video_el = parser.css_first("video#hdPlayer, video")
+        if video_el and video_el.attributes.get("data-img"):
+            thumbnail = video_el.attributes.get("data-img")
+        if not thumbnail:
+            og_img = parser.css_first('meta[property="og:image"], meta[name="twitter:image"]')
+            if og_img and og_img.attributes.get("content"):
+                thumbnail = og_img.attributes.get("content")
+
+        # Duration / Length
+        length = None
+        meta_dur = parser.css_first('meta[property="og:video:duration"]')
+        if meta_dur and meta_dur.attributes.get("content"):
+            length = meta_dur.attributes.get("content").strip()
+        if not length and video_el and video_el.attributes.get("data-vtt"):
+            vtt = video_el.attributes.get("data-vtt")
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(vtt).query)
+            if "time" in qs:
+                length = qs["time"][0]
+
+        # Categories
+        categories = []
+        cat_container = None
+        for div in parser.css("div.p-bold"):
+            if "Categories:" in div.text():
+                cat_container = div
+                break
+        if cat_container:
+            categories = [a.text(strip=True) for a in cat_container.css("a") if a.text(strip=True)]
+        if not categories:
+            categories = [a.text(strip=True) for a in parser.css('a[href*="/videos/"]') if a.text(strip=True)]
+
+        # Tags
+        tags = []
+        tag_nodes = parser.css("div.videoTagsSpace a, a.tag")
+        if tag_nodes:
+            for t in tag_nodes:
+                text = t.text(strip=True)
+                if text and text not in tags:
+                    tags.append(text)
+        if not tags:
+            meta_tags = parser.css('meta[property="video:tag"]')
+            for m in meta_tags:
+                c = m.attributes.get("content")
+                if c and c.strip() and c.strip() not in tags:
+                    tags.append(c.strip())
+
+        # CDN URLs (deduplicated, order preserved)
+        cdn_urls = []
+        for tag in parser.css('video source[src], source[src]'):
+            src = tag.attributes.get("src")
+            if src and src not in cdn_urls:
+                cdn_urls.append(src)
+
+        # Embed URL
+        embed_url = None
+        embed_textarea = parser.css_first("textarea#video_embed_code")
+        if embed_textarea and embed_textarea.text():
+            iframe_parser = LexborHTMLParser(embed_textarea.text())
+            iframe = iframe_parser.css_first("iframe")
+            if iframe and iframe.attributes.get("src"):
+                embed_url = iframe.attributes.get("src")
+        if not embed_url:
+            og_embed = parser.css_first('meta[property="og:video:url"], meta[name="twitter:player"]')
+            if og_embed and og_embed.attributes.get("content"):
+                embed_url = og_embed.attributes.get("content")
+
+        # Rating percentage computed from likes and dislikes
+        rating = None
+        if likes and dislikes:
+            try:
+                l_val = int(likes)
+                d_val = int(dislikes)
+                if l_val + d_val > 0:
+                    rating = f"{round((l_val / (l_val + d_val)) * 100)}%"
+            except ValueError:
+                pass
 
         return {
             "title": title,
@@ -150,11 +277,16 @@ class Video(BaseMedia):
             "publish_date": publish_date,
             "views": views,
             "author": author,
+            "author_url": author_url,
+            "author_thumbnail": author_thumbnail,
+            "author_subscribers": author_subscribers,
             "thumbnail": thumbnail,
             "length": length,
             "categories": categories,
             "tags": tags,
-            "cdn_urls": cdn_urls
+            "cdn_urls": cdn_urls,
+            "embed_url": embed_url,
+            "rating": rating,
         }
 
     async def download(self, configuration: DownloadConfigRAW):
@@ -163,15 +295,16 @@ class Video(BaseMedia):
             cdn_urls = self.cdn_urls
             config = configuration
 
-            if len(cdn_urls) == 2: # There's no further quality specification other than HD / SD...
-                if config.quality == "hd":
-                    download_url = cdn_urls[1] # HD quality
+            if not cdn_urls:
+                raise DownloadFailed(f"No CDN URLs available to download for {self.url}")
 
+            if len(cdn_urls) == 2:  # There's no further quality specification other than HD / SD...
+                if config.quality in ("hd", "best"):
+                    download_url = cdn_urls[1]  # HD quality
                 else:
-                    download_url = cdn_urls[0] # SD quality
-
+                    download_url = cdn_urls[0]  # SD quality
             else:
-                download_url = cdn_urls[0] # Video is only available in SD quality
+                download_url = cdn_urls[0]  # Video is only available in SD quality
 
             if not config.no_title:
                 config.path = os.path.join(config.path, f"{self.title}.mp4")
@@ -185,15 +318,14 @@ class Video(BaseMedia):
             raise DownloadFailed(f"Download failed for {self.url}: {e}") from e
 
     def video_qualities(self) -> list[int]:
+        if not self.cdn_urls:
+            return []
         if len(self.cdn_urls) == 1:
             return [480]
-
         elif len(self.cdn_urls) == 2:
             return [480, 720]
-
         elif len(self.cdn_urls) >= 3:
             print(f"TELL ME IMMEDIATELY ON GITHUB WHAT YOU DID, LIKE RIGHT NOW!: {self.cdn_urls}")
-
         return []
 
 
