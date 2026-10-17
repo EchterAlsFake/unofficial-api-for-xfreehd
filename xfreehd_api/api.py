@@ -12,6 +12,7 @@ import argparse
 import urllib.parse
 
 from xfreehd_api.modules import errors as provider_errors
+from base_api import update_url_query
 from base_api.modules.provider import fetch_content, download_errors, prepare_download_config
 from base_api.modules.logger import configure_app_logging, get_logger
 
@@ -333,7 +334,7 @@ class Album(BaseMedia):
         if page > total_pages_count:
             raise NotFound(f"Album page {page} does not exist for {self.url}; total pages={total_pages_count}")
 
-        url = f"{self.url}?page={page}"
+        url = update_url_query(self.resolved_url or self.url, page=page)
         html = await get_html_content(core=self.core, url=url, owner=self)
         assert isinstance(html, str)
         images = await asyncio.to_thread(self._scrape_images, html)
@@ -343,7 +344,7 @@ class Album(BaseMedia):
     async def get_all_images(self) -> list:
         all_images = []
         total_pages_count = await self.get_field("total_pages_count")
-        page_urls = [f"{self.url}?page={page}" for page in range(1, total_pages_count + 1)]
+        page_urls = [update_url_query(self.resolved_url or self.url, page=page) for page in range(1, total_pages_count + 1)]
 
         if page_urls:
             pages_html = await asyncio.gather(*[get_html_content(core=self.core, url=url, owner=self) for url in page_urls])
