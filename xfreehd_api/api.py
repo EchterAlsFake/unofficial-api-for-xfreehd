@@ -6,6 +6,7 @@ If you haven't received the license with this library, see: https://www.gnu.org/
 Only use this library under your local laws. I do not endorse any copyright infringement.
 """
 import math
+import re
 import asyncio
 import logging
 import argparse
@@ -65,6 +66,7 @@ async def get_html_content(core: BaseCore, url: str, *, owner=None) -> str:
 class Video(BaseMedia):
     url: str
     core: BaseCore
+    video_id: str | None = None
     title: str | None = media_field("html")
     likes: str | None = media_field("html")
     dislikes: str | None = media_field("html")
@@ -83,8 +85,31 @@ class Video(BaseMedia):
 
     # Optional / Loaded
     rating: str | None = media_field("html")
+    is_private: bool | None = media_field("html")
 
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
+
+    def __post_init__(self) -> None:
+        raw_url = self.url.strip()
+        if raw_url.isdigit():
+            object.__setattr__(self, "video_id", raw_url)
+            object.__setattr__(self, "url", f"https://xfreehd.com/video/{raw_url}")
+            return
+
+        if raw_url.startswith("/"):
+            raw_url = f"https://xfreehd.com{raw_url}"
+            object.__setattr__(self, "url", raw_url)
+
+        embed_match = re.search(r"/embed/(\d+)", raw_url)
+        if embed_match:
+            vid = embed_match.group(1)
+            object.__setattr__(self, "video_id", vid)
+            object.__setattr__(self, "url", f"https://xfreehd.com/video/{vid}")
+            return
+
+        vid_match = re.search(r"/video/(\d+)", raw_url)
+        if vid_match:
+            object.__setattr__(self, "video_id", vid_match.group(1))
 
     async def _load_html(self) -> dict[str, object]:
         html_content = await get_html_content(core=self.core, url=self.url, owner=self)
@@ -95,6 +120,27 @@ class Video(BaseMedia):
         parser = LexborHTMLParser(html_content)
         if "This Video Is No Longer Available." in html_content:
             raise ResourceGone("Video is no longer available")
+
+        is_private = parser.css_first("div.video-private-container") is not None
+
+        def _parse_count(text: str | None) -> float | None:
+            if not text:
+                return None
+            cleaned = text.strip().replace(",", "")
+            if cleaned.endswith(("k", "K")):
+                try:
+                    return float(cleaned[:-1]) * 1000
+                except ValueError:
+                    return None
+            elif cleaned.endswith(("m", "M")):
+                try:
+                    return float(cleaned[:-1]) * 1000000
+                except ValueError:
+                    return None
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
 
         # Title: h1 -> meta og/twitter -> share link -> player data-target slug
         title = None
@@ -177,6 +223,15 @@ class Video(BaseMedia):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(vtt).query)
             if "time" in qs:
                 length = qs["time"][0]
+        if not length:
+            json_ld_el = parser.css_first('script[type="application/ld+json"]')
+            if json_ld_el and json_ld_el.text():
+                dur_match = re.search(r'"duration":\s*"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?"', json_ld_el.text())
+                if dur_match:
+                    h, m, s = dur_match.groups()
+                    total_secs = int(h or 0) * 3600 + int(m or 0) * 60 + int(s or 0)
+                    if total_secs > 0:
+                        length = str(total_secs)
 
         # Categories
         categories = []
@@ -225,16 +280,19 @@ class Video(BaseMedia):
             if og_embed and og_embed.attributes.get("content"):
                 embed_url = og_embed.attributes.get("content")
 
-        # Rating percentage computed from likes and dislikes
+        # Rating percentage computed from likes and dislikes or page indicator
         rating = None
         if likes and dislikes:
-            try:
-                l_val = int(likes)
-                d_val = int(dislikes)
-                if l_val + d_val > 0:
-                    rating = f"{round((l_val / (l_val + d_val)) * 100)}%"
-            except ValueError:
-                pass
+            l_val = _parse_count(likes)
+            d_val = _parse_count(dislikes)
+            if l_val is not None and d_val is not None and (l_val + d_val > 0):
+                rating = f"{round((l_val / (l_val + d_val)) * 100)}%"
+        if not rating:
+            rate_el = parser.css_first("div.video-rating-new b, span.rating-percent")
+            if rate_el and rate_el.text(strip=True):
+                r_txt = rate_el.text(strip=True)
+                if "%" in r_txt:
+                    rating = r_txt
 
         return {
             "title": title,
@@ -253,25 +311,31 @@ class Video(BaseMedia):
             "cdn_urls": cdn_urls,
             "embed_url": embed_url,
             "rating": rating,
+            "is_private": is_private,
         }
 
     @download_errors(DownloadFailed)
     async def download(self, configuration: DownloadConfigRAW):
         await self.load_fields("cdn_urls", "title")
         cdn_urls = self.cdn_urls
-        config = prepare_download_config(configuration, self.title)
+        title = self.title or self.video_id or "video"
+        config = prepare_download_config(configuration, title)
 
         if not cdn_urls:
+            if getattr(self, "is_private", False):
+                raise DownloadFailed(f"Video is private and cannot be downloaded: {self.url}")
             raise DownloadFailed(f"No CDN URLs available to download for {self.url}")
 
-        if len(cdn_urls) == 2:  # There's no further quality specification other than HD / SD...
-            if config.quality in ("hd", "best"):
-                download_url = cdn_urls[1]  # HD quality
+        q_str = str(config.quality).lower() if config.quality is not None else "best"
+        if len(cdn_urls) > 1:
+            if q_str in ("hd", "best", "720", "1080", "2160", "4k"):
+                download_url = cdn_urls[-1]
+            elif q_str in ("half", "mid", "middle"):
+                download_url = cdn_urls[len(cdn_urls) // 2]
             else:
-                download_url = cdn_urls[0]  # SD quality
+                download_url = cdn_urls[0]
         else:
-            download_url = cdn_urls[0]  # Video is only available in SD quality
-
+            download_url = cdn_urls[0]
 
         return await self.core.legacy_download(url=download_url, configuration=config)
 
@@ -282,8 +346,10 @@ class Video(BaseMedia):
             return [480]
         elif len(self.cdn_urls) == 2:
             return [480, 720]
-        elif len(self.cdn_urls) >= 3:
-            print(f"TELL ME IMMEDIATELY ON GITHUB WHAT YOU DID, LIKE RIGHT NOW!: {self.cdn_urls}")
+        elif len(self.cdn_urls) == 3:
+            return [480, 720, 1080]
+        elif len(self.cdn_urls) >= 4:
+            return [480, 720, 1080, 2160]
         return []
 
 
@@ -291,10 +357,26 @@ class Video(BaseMedia):
 class Album(BaseMedia):
     url: str
     core: BaseCore
+    album_id: str | None = None
     title: str | None = media_field("html")
     total_pages_count: int | None = media_field("html")
 
     loader_methods: ClassVar[dict[str, str]] = {"html": "_load_html"}
+
+    def __post_init__(self) -> None:
+        raw_url = self.url.strip()
+        if raw_url.isdigit():
+            object.__setattr__(self, "album_id", raw_url)
+            object.__setattr__(self, "url", f"https://xfreehd.com/album/{raw_url}")
+            return
+
+        if raw_url.startswith("/"):
+            raw_url = f"https://xfreehd.com{raw_url}"
+            object.__setattr__(self, "url", raw_url)
+
+        alb_match = re.search(r"/album/(\d+)", raw_url)
+        if alb_match:
+            object.__setattr__(self, "album_id", alb_match.group(1))
 
     async def _load_html(self) -> dict[str, object]:
         html_content = await get_html_content(core=self.core, url=self.url, owner=self)
@@ -303,17 +385,32 @@ class Album(BaseMedia):
     @staticmethod
     def _extract_data(html_content: str) -> dict:
         parser = LexborHTMLParser(html_content)
-        title = parser.css_first("h1.pull-left").text(strip=True)
-        stuff = parser.css("div.panel-body")[2]
-        start = int(stuff.css_first("span.text-white").text(strip=True))
-        end = int(stuff.css("span.text-white")[1].text(strip=True))
-        total = int(stuff.css("span.text-white")[2].text(strip=True))
+        if "This Album Is No Longer Available." in html_content:
+            raise ResourceGone("Album is no longer available")
 
-        per_page = end - start + 1
-        if per_page <= 0:
-            raise ValueError(f"Invalid range: start={start}, end={end}")
+        title_el = parser.css_first("h1.pull-left, h1")
+        title = None
+        if title_el and title_el.text(strip=True):
+            title = title_el.text(strip=True)
+        if not title:
+            og_title = parser.css_first('meta[property="og:title"], meta[name="twitter:title"]')
+            if og_title and og_title.attributes.get("content"):
+                title = og_title.attributes.get("content").strip()
 
-        total_pages_count = math.ceil(total / per_page)
+        total_pages_count = 1
+        for pb in parser.css("div.panel-body"):
+            spans = pb.css("span.text-white")
+            if len(spans) >= 3 and "photo" in pb.text().lower():
+                try:
+                    start = int(spans[0].text(strip=True))
+                    end = int(spans[1].text(strip=True))
+                    total = int(spans[2].text(strip=True))
+                    per_page = end - start + 1
+                    if per_page > 0:
+                        total_pages_count = math.ceil(total / per_page)
+                    break
+                except (ValueError, TypeError):
+                    pass
 
         return {
             "title": title,
@@ -324,14 +421,18 @@ class Album(BaseMedia):
     def _scrape_images(html_content: str) -> list[str]:
         soup = LexborHTMLParser(html_content)
         divs = soup.css("div.thumb-overlay.album-thumb")
-        a_tags = [div.css_first("a") for div in divs]
-        urls = [a.attributes.get("href") for a in a_tags]
-
+        urls = []
+        for div in divs:
+            a_tag = div.css_first("a")
+            if a_tag and a_tag.attributes.get("href"):
+                urls.append(a_tag.attributes.get("href"))
         return urls
 
     async def get_images_by_page(self, page: int = 1) -> list:
+        if page < 1:
+            raise ValueError(f"Album page must be >= 1, got {page}")
         total_pages_count = await self.get_field("total_pages_count")
-        if page > total_pages_count:
+        if total_pages_count is not None and total_pages_count > 0 and page > total_pages_count:
             raise NotFound(f"Album page {page} does not exist for {self.url}; total pages={total_pages_count}")
 
         url = update_url_query(self.resolved_url or self.url, page=page)
@@ -343,13 +444,16 @@ class Album(BaseMedia):
 
     async def get_all_images(self) -> list:
         all_images = []
-        total_pages_count = await self.get_field("total_pages_count")
+        total_pages_count = await self.get_field("total_pages_count") or 1
         page_urls = [update_url_query(self.resolved_url or self.url, page=page) for page in range(1, total_pages_count + 1)]
 
         if page_urls:
             pages_html = await asyncio.gather(*[get_html_content(core=self.core, url=url, owner=self) for url in page_urls])
             for html in pages_html:
-                all_images.extend(await asyncio.to_thread(self._scrape_images, html))
+                scraped = await asyncio.to_thread(self._scrape_images, html)
+                for img in scraped:
+                    if img not in all_images:
+                        all_images.append(img)
 
         return all_images
 
@@ -361,6 +465,15 @@ class Client:
         self.core = core
         self.core.initialize_session()
         self.helper = Helper(core=self.core, constructor=Video)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def close(self):
+        await self.core.close()
 
     async def get_video(self, url: str, load_html: bool = True) -> Video:
         video = Video(url=url, core=self.core)
@@ -378,10 +491,18 @@ class Client:
         self,
         query: str,
         pages: int = 5,
+        sort_by: str | None = None,
+        time_frame: str | None = None,
         iterator_config: IteratorConfig | None = None,
     ) -> AsyncGenerator[ScrapeResult[Video], None]:
-        query = query.replace(" ", "+")
-        page_urls = [f"https://xfreehd.com/search?search_query={query}&search_type=videos&page={page}" for page in range(1, pages + 1)]
+        encoded_query = urllib.parse.quote_plus(query)
+        base_search_url = f"https://xfreehd.com/search?search_query={encoded_query}&search_type=videos"
+        if sort_by:
+            base_search_url += f"&o={urllib.parse.quote_plus(sort_by)}"
+        if time_frame:
+            base_search_url += f"&t={urllib.parse.quote_plus(time_frame)}"
+
+        page_urls = [f"{base_search_url}&page={page}" for page in range(1, max(1, pages) + 1)] if pages > 0 else []
         return scrape_stream(
             core=self.core,
             constructor=Video,
@@ -413,8 +534,12 @@ async def run_main(args_list: list[str] | None = None):
     if args.download:
         urls.append(args.download)
     if args.file:
-        with open(args.file, "r") as f:
-            urls.extend([line.strip() for line in f if line.strip()])
+        try:
+            with open(args.file, "r") as f:
+                urls.extend([line.strip() for line in f if line.strip()])
+        except OSError as e:
+            print(f"Error reading file {args.file}: {e}")
+            return
 
     if not urls:
         parser.print_help()

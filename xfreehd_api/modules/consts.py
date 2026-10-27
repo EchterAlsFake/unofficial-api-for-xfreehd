@@ -10,6 +10,8 @@ def extractor_search(html_content: str) -> list[dict]:
 
     # Target the main grid columns containing the videos
     video_nodes = parser.css("div.col-xs-6.col-sm-6.col-md-4.col-lg-4")
+    if not video_nodes:
+        video_nodes = [a.parent for a in parser.css("a.video-link") if a.parent]
 
     for node in video_nodes:
         # Use .css_first() to find single child elements safely
@@ -25,8 +27,8 @@ def extractor_search(html_content: str) -> list[dict]:
         title = title_el.text(strip=True) if title_el else ""
 
         # Extract Thumbnail Image URL
-        img_el = node.css_first("img.img-responsive2")
-        thumb_url = img_el.attributes.get("data-src") or img_el.attributes.get("src") if img_el else ""
+        img_el = node.css_first("img.img-responsive2, img")
+        thumb_url = (img_el.attributes.get("data-src") or img_el.attributes.get("src")) if img_el else ""
 
         # Extract Duration
         duration_el = node.css_first("div.duration-new")
@@ -37,7 +39,7 @@ def extractor_search(html_content: str) -> list[dict]:
         views = views_el.text(strip=True) if views_el else ""
 
         # Extract Rating Percentage
-        rating_el = node.css_first("div.video-rating-new b")
+        rating_el = node.css_first("div.video-rating-new b, div.video-rating-new")
         rating = rating_el.text(strip=True) if rating_el else ""
 
         # Append data dictionary to the list

@@ -102,12 +102,13 @@ def test_extract_sample_html():
     assert len(data["cdn_urls"]) == 2
     assert data["embed_url"] == "https://beta.xfreehd.com/embed/1074729"
     assert data["rating"] == "53%"
+    assert data["is_private"] is False
 
 
 @pytest.mark.asyncio
 async def test_all():
     client = Client()
-    url = "https://beta.xfreehd.com/video/929816/tap-out-pmv"
+    url = "https://beta.xfreehd.com/video/1092426/jmonn-omg-the-latest-cchd-23-10-26"
     video = await client.get_video(url)
     assert isinstance(video.title, str) and len(video.title) > 0
     assert isinstance(video.likes, str) and len(video.likes) > 0
@@ -126,5 +127,16 @@ async def test_all():
     assert isinstance(video.length, str) and len(video.length) > 0
     assert isinstance(video.rating, str) and len(video.rating) > 0
     assert video.video_qualities() == [480, 720]
+    assert video.is_private is False
+    assert video.video_id == "1092426"
     assert await video.download(DownloadConfigRAW(quality="sd")) is True
     assert await video.download(DownloadConfigRAW(quality="hd")) is True
+
+
+@pytest.mark.asyncio
+async def test_video_gone():
+    client = Client()
+    url = "https://beta.xfreehd.com/video/929816/tap-out-pmv"
+    with pytest.raises(Exception) as exc_info:
+        await client.get_video(url)
+    assert "no longer available" in str(exc_info.value).lower()

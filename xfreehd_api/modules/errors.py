@@ -5,6 +5,7 @@ from base_api.modules.errors import (
     ProxyError,
     UnknownNetworkError,
     DownloadFailed,
+    ResourceGone,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "ProxyError",
     "UnknownNetworkError",
     "DownloadFailed",
+    "ResourceGone",
 ]
