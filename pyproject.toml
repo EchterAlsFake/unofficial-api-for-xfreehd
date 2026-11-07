@@ -57,3 +57,17 @@ packages = { find = {} }
 [tool.uv.build-backend]
 module-name = "xfreehd_api"
 module-root = ""
+
+[dependency-groups]
+dev = [
+    "fastapi>=0.162.1",
+    "httpx>=0.28.1",
+    "pydantic>=2.14.3",
+    "uvicorn[standard]>=0.54.0",
+]
+gui = [
+    "httpx>=0.28.1",
+    "unofficial-api-for-beeg>=1.7.4",
+    "unofficial-api-for-missav>=2.6.2",
+    "unofficial-api-for-xnxx>=2.4.4",
+]

@@ -211,3 +211,8 @@ __marimo__/
 .venv/
 *.mp4
 *.mp4.tmp
+
+# Frontend
+node_modules/
+web/frontend/dist/
+
