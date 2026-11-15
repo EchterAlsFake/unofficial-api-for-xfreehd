@@ -1,3 +1,5 @@
+from base_api import paginated_stream, PageInfo, validate_pagination
+from base_api.modules.pagination import linked_page
 """
 Copyright (C) 2025-2026 Johannes Habel
 Licensed under LGPLv3
@@ -429,33 +431,31 @@ class Album(BaseMedia):
         return urls
 
     async def get_images_by_page(self, page: int = 1) -> list:
-        if page < 1:
-            raise ValueError(f"Album page must be >= 1, got {page}")
-        total_pages_count = await self.get_field("total_pages_count")
-        if total_pages_count is not None and total_pages_count > 0 and page > total_pages_count:
-            raise NotFound(f"Album page {page} does not exist for {self.url}; total pages={total_pages_count}")
+        validate_pagination(1, page)
+        total = await self.get_field("total_pages_count")
+        if total is not None and page > total:
+            return []
+        html = await get_html_content(
+            core=self.core,
+            url=update_url_query(self.resolved_url or self.url, page=page),
+            owner=self,
+        )
+        return await asyncio.to_thread(self._scrape_images, html)
 
-        url = update_url_query(self.resolved_url or self.url, page=page)
-        html = await get_html_content(core=self.core, url=url, owner=self)
-        assert isinstance(html, str)
-        images = await asyncio.to_thread(self._scrape_images, html)
-
+    async def get_all_images(self, pages: int | str = "all", *, start_page=1) -> list:
+        validate_pagination(pages, start_page)
+        total = await self.get_field("total_pages_count")
+        if total is None:
+            raise ValueError("Album did not expose its pagination count")
+        end = total if pages == "all" else min(total, start_page + pages - 1)
+        images = []
+        seen = set()
+        for page in range(start_page, end + 1):
+            for image in await self.get_images_by_page(page):
+                if image not in seen:
+                    seen.add(image)
+                    images.append(image)
         return images
-
-    async def get_all_images(self) -> list:
-        all_images = []
-        total_pages_count = await self.get_field("total_pages_count") or 1
-        page_urls = [update_url_query(self.resolved_url or self.url, page=page) for page in range(1, total_pages_count + 1)]
-
-        if page_urls:
-            pages_html = await asyncio.gather(*[get_html_content(core=self.core, url=url, owner=self) for url in page_urls])
-            for html in pages_html:
-                scraped = await asyncio.to_thread(self._scrape_images, html)
-                for img in scraped:
-                    if img not in all_images:
-                        all_images.append(img)
-
-        return all_images
 
 
 class Client:
@@ -490,27 +490,37 @@ class Client:
     def search(
         self,
         query: str,
-        pages: int = 5,
+        pages: int | str = 1,
         sort_by: str | None = None,
         time_frame: str | None = None,
         iterator_config: IteratorConfig | None = None,
+        *,
+        start_page: int = 1,
     ) -> AsyncGenerator[ScrapeResult[Video], None]:
+        validate_pagination(pages, start_page)
         encoded_query = urllib.parse.quote_plus(query)
         base_search_url = f"https://xfreehd.com/search?search_query={encoded_query}&search_type=videos"
         if sort_by:
             base_search_url += f"&o={urllib.parse.quote_plus(sort_by)}"
         if time_frame:
             base_search_url += f"&t={urllib.parse.quote_plus(time_frame)}"
-
-        page_urls = [f"{base_search_url}&page={page}" for page in range(1, max(1, pages) + 1)] if pages > 0 else []
-        return scrape_stream(
+        page_url = lambda page: f"{base_search_url}&page={page}"
+        return paginated_stream(
             core=self.core,
             constructor=Video,
-            target_page_urls=page_urls,
             item_extractor=extractor_search,
             iterator_config=iterator_config,
+            page_url=page_url,
+            pages=pages,
+            start_page=start_page,
+            page_info=lambda content, page, rows: _pagination_info(
+                content, page, rows, page_url=page_url
+            ),
         )
 
+
+def _pagination_info(content, page, rows, *, page_url):
+    return linked_page(content, page, rows, page_url=page_url)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -569,3 +579,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
